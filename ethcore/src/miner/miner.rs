@@ -616,10 +616,269 @@ impl Miner {
                 .remove(not_allowed_transactions.iter(), false);
             self.transaction_queue.penalize(senders_to_penalize.iter());
         }
-
+        self.prepare_next_block(chain, &block.transactions_set);
         Some((block, original_work_hash))
     }
 
+    //fn prepare_next_block<C>(&self, chain: &C) -> Option<(ClosedBlock, Option<H256>)>
+    fn prepare_next_block<C>(&self, chain: &C, txs: &HashSet<H256>) -> bool
+    where
+        C: BlockChain + CallContract + BlockProducer + Nonce + Sync,
+    {
+        trace_time!("prepare_next_block");
+        let chain_info = chain.chain_info();
+        /*
+
+        // Open block
+        let (mut open_block, original_work_hash) = {
+            let mut sealing = self.sealing.lock();
+            let last_work_hash = sealing.queue.peek_last_ref().map(|pb| pb.header.hash());
+            let best_hash = chain_info.best_block_hash;
+
+            // check to see if last ClosedBlock in would_seals is actually same parent block.
+            // if so
+            //   duplicate, re-open and push any new transactions.
+            //   if at least one was pushed successfully, close and enqueue new ClosedBlock;
+            //   otherwise, leave everything alone.
+            // otherwise, author a fresh block.
+            let mut open_block = match sealing
+                .queue
+                .get_pending_if(|b| b.header.parent_hash() == &best_hash)
+            {
+                Some(old_block) => {
+                    trace!(target: "miner", "prepare_block: Already have previous work; updating and returning");
+                    // add transactions to old_block
+                    chain.reopen_block(old_block)
+                }
+                None => {
+                    // block not found - create it.
+                    trace!(target: "miner", "prepare_block: No existing work - making new block");
+                    let params = self.params.read().clone();
+
+                    match chain.prepare_open_block(
+                        params.author,
+                        params.gas_range_target,
+                        params.extra_data,
+                    ) {
+                        Ok(block) => block,
+                        Err(err) => {
+                            warn!(target: "miner", "Open new block failed with error {:?}. This is likely an error in chain specificiations or on-chain consensus smart contracts.", err);
+                            return None;
+                        }
+                    }
+                }
+            };
+
+            if self.options.infinite_pending_block {
+                open_block.remove_gas_limit();
+            }
+
+            (open_block, last_work_hash)
+        };
+        */
+
+        let params = self.params.read().clone();
+        /*
+        let mut open_block = chain.prepare_open_block(
+                         params.author,
+                         params.gas_range_target,
+                         params.extra_data,
+                     );
+                     */
+
+
+
+        let mut open_block =
+                match chain.prepare_open_block(
+                    params.author,
+                    params.gas_range_target,
+                    params.extra_data,
+                ) {
+                    Ok(block) => block,
+                    Err(err) => {
+                        warn!(target: "miner", "Error {:?}", err);
+                        return false;
+                    }
+                };
+
+
+        let mut invalid_transactions = HashSet::new();
+        let mut not_allowed_transactions = HashSet::new();
+        //let mut senders_to_penalize = HashSet::new();
+        let block_number = open_block.header.number();
+        let mut gas_prices = Vec::new();
+
+        let mut tx_count = 0usize;
+        let mut skipped_transactions = 0usize;
+
+        let client = self.pool_client(chain);
+        let engine_params = self.engine.params();
+        let min_tx_gas: U256 = self
+            .engine
+            .schedule(chain_info.best_block_number)
+            .tx_gas
+            .into();
+        let nonce_cap: Option<U256> = if chain_info.best_block_number + 1
+            >= engine_params.dust_protection_transition
+        {
+            Some((engine_params.nonce_cap_increment * (chain_info.best_block_number + 1)).into())
+        } else {
+            None
+        };
+        // we will never need more transactions than limit divided by min gas
+        let max_transactions = if min_tx_gas.is_zero() {
+            usize::max_value()
+        } else {
+            MAX_SKIPPED_TRANSACTIONS.saturating_add(
+                cmp::min(
+                    *open_block.header.gas_limit() / min_tx_gas,
+                    u64::max_value().into(),
+                )
+                .as_u64() as usize,
+            )
+        };
+
+        let pending: Vec<Arc<_>> = self.transaction_queue.pending(
+            client.clone(),
+            pool::PendingSettings {
+                block_number: chain_info.best_block_number,
+                current_timestamp: chain_info.best_block_timestamp,
+                nonce_cap,
+                max_len: max_transactions,
+                ordering: miner::PendingOrdering::Priority,
+            },
+        );
+
+        let took_ms = |elapsed: &Duration| {
+            elapsed.as_secs() * 1000 + elapsed.subsec_nanos() as u64 / 1_000_000
+        };
+
+        let block_start = Instant::now();
+        debug!(target: "miner", "Attempting to push {} transactions.", pending.len());
+
+        for tx in pending {
+            let start = Instant::now();
+
+            let transaction = tx.signed().clone();
+            gas_prices.push(transaction.tx().gas_price);
+            let hash = transaction.hash();
+            if txs.contains(&hash) {
+                debug!(target: "miner", "Tx {} already in pending block", hash);
+                continue
+            }
+            //let sender = transaction.sender();
+
+            // Re-verify transaction again vs current state.
+            let result = client
+                .verify_for_pending_block(&transaction, &open_block.header)
+                .map_err(|e| e.into())
+                .and_then(|_| open_block.push_transaction(transaction, None));
+
+            let took = start.elapsed();
+            let last_gas_price = gas_prices.last();
+            debug!(target: "miner", "last pushed transaction gas price {}", last_gas_price.unwrap());
+
+            /*
+            // Check for heavy transactions
+            match self.options.tx_queue_penalization {
+                Penalization::Enabled {
+                    ref offend_threshold,
+                } if &took > offend_threshold => {
+                    senders_to_penalize.insert(sender);
+                    debug!(target: "miner", "Detected heavy transaction ({} ms). Penalizing sender.", took_ms(&took));
+                }
+                _ => {}
+            }
+            */
+
+            debug!(target: "miner", "Adding tx {:?} took {} ms", hash, took_ms(&took));
+            match result {
+                Err(Error(
+                    ErrorKind::Execution(ExecutionError::BlockGasLimitReached {
+                        gas_limit,
+                        gas_used,
+                        gas,
+                    }),
+                    _,
+                )) => {
+                    debug!(target: "miner", "Skipping adding transaction to block because of gas limit: {:?} (limit: {:?}, used: {:?}, gas: {:?})", hash, gas_limit, gas_used, gas);
+
+                    // Penalize transaction if it's above current gas limit
+                    if gas > gas_limit {
+                        debug!(target: "txqueue", "[{:?}] Transaction above block gas limit.", hash);
+                        invalid_transactions.insert(hash);
+                    }
+
+                    // Exit early if gas left is smaller then min_tx_gas
+                    let gas_left = gas_limit - gas_used;
+                    if gas_left < min_tx_gas {
+                        debug!(target: "miner", "Remaining gas is lower than minimal gas for a transaction. Block is full.");
+                        break;
+                    }
+
+                    // Avoid iterating over the entire queue in case block is almost full.
+                    skipped_transactions += 1;
+                    if skipped_transactions > MAX_SKIPPED_TRANSACTIONS {
+                        debug!(target: "miner", "Reached skipped transactions threshold. Assuming block is full.");
+                        break;
+                    }
+                }
+                // Invalid nonce error can happen only if previous transaction is skipped because of gas limit.
+                // If there is errornous state of transaction queue it will be fixed when next block is imported.
+                Err(Error(
+                    ErrorKind::Execution(ExecutionError::InvalidNonce { expected, got }),
+                    _,
+                )) => {
+                    debug!(target: "miner", "Skipping adding transaction to block because of invalid nonce: {:?} (expected: {:?}, got: {:?})", hash, expected, got);
+                }
+                // already have transaction - ignore
+                Err(Error(ErrorKind::Transaction(transaction::Error::AlreadyImported), _)) => {}
+                Err(Error(ErrorKind::Transaction(transaction::Error::NotAllowed), _)) => {
+                    not_allowed_transactions.insert(hash);
+                    debug!(target: "miner", "Skipping non-allowed transaction for sender {:?}", hash);
+                }
+                Err(e) => {
+                    debug!(target: "txqueue", "[{:?}] Marking as invalid: {:?}.", hash, e);
+                    debug!(
+                        target: "miner", "Error adding transaction to block: number={}. transaction_hash={:?}, Error: {:?}", block_number, hash, e
+                    );
+                    invalid_transactions.insert(hash);
+                }
+                // imported ok
+                _ => tx_count += 1,
+            }
+        }
+
+        let elapsed = block_start.elapsed();
+        let mut min_price:std::string::String = "None".to_string();
+        match gas_prices.iter().min() {
+            Some(v) => min_price = v.to_string(), 
+            _ => (),
+        }
+        info!(target: "miner", "latest_block: {} prepare_next_block() complete. min price is {}", block_number, min_price);
+        debug!(target: "miner", "Pushed {} transactions in {} ms", tx_count, took_ms(&elapsed));
+
+        /*
+        let block = match open_block.close() {
+            Ok(block) => block,
+            Err(err) => {
+                warn!(target: "miner", "Closing the block failed with error {:?}. This is likely an error in chain specificiations or on-chain consensus smart contracts.", err);
+                return None;
+            }
+        };
+
+        {
+            self.transaction_queue
+                .remove(invalid_transactions.iter(), true);
+            self.transaction_queue
+                .remove(not_allowed_transactions.iter(), false);
+            self.transaction_queue.penalize(senders_to_penalize.iter());
+        }
+
+        Some((block, original_work_hash))
+        */
+        return true;
+    }
     /// Returns `true` if we should create pending block even if some other conditions are not met.
     ///
     /// In general we always seal iff:
