@@ -616,11 +616,11 @@ impl Miner {
                 .remove(not_allowed_transactions.iter(), false);
             self.transaction_queue.penalize(senders_to_penalize.iter());
         }
-        self.prepare_next_block(chain, &block.transactions_set);
+        //self.prepare_next_block(chain, &block.transactions_set);
+        info!(target: "miner", "Prepare_block w/ {} txs", block.transactions_set.len());
         Some((block, original_work_hash))
     }
 
-    //fn prepare_next_block<C>(&self, chain: &C) -> Option<(ClosedBlock, Option<H256>)>
     fn prepare_next_block<C>(&self, chain: &C, txs: &HashSet<H256>) -> bool
     where
         C: BlockChain + CallContract + BlockProducer + Nonce + Sync,
@@ -704,7 +704,7 @@ impl Miner {
 
         let mut invalid_transactions = HashSet::new();
         let mut not_allowed_transactions = HashSet::new();
-        //let mut senders_to_penalize = HashSet::new();
+        let mut senders_to_penalize = HashSet::new();
         let block_number = open_block.header.number();
         let mut gas_prices = Vec::new();
 
@@ -718,6 +718,7 @@ impl Miner {
             .schedule(chain_info.best_block_number)
             .tx_gas
             .into();
+
         let nonce_cap: Option<U256> = if chain_info.best_block_number + 1
             >= engine_params.dust_protection_transition
         {
@@ -725,6 +726,7 @@ impl Miner {
         } else {
             None
         };
+
         // we will never need more transactions than limit divided by min gas
         let max_transactions = if min_tx_gas.is_zero() {
             usize::max_value()
@@ -758,12 +760,12 @@ impl Miner {
 
         for tx in pending {
             let start = Instant::now();
-
             let transaction = tx.signed().clone();
-            gas_prices.push(transaction.tx().gas_price);
+            let gas_price = transaction.tx().gas_price;
             let hash = transaction.hash();
+            let sender = transaction.sender();
             if txs.contains(&hash) {
-                debug!(target: "miner", "Tx {} already in pending block", hash);
+                info!(target: "miner", "Tx {} already in pending block", hash);
                 continue
             }
             //let sender = transaction.sender();
@@ -775,10 +777,7 @@ impl Miner {
                 .and_then(|_| open_block.push_transaction(transaction, None));
 
             let took = start.elapsed();
-            let last_gas_price = gas_prices.last();
-            debug!(target: "miner", "last pushed transaction gas price {}", last_gas_price.unwrap());
 
-            /*
             // Check for heavy transactions
             match self.options.tx_queue_penalization {
                 Penalization::Enabled {
@@ -789,7 +788,6 @@ impl Miner {
                 }
                 _ => {}
             }
-            */
 
             debug!(target: "miner", "Adding tx {:?} took {} ms", hash, took_ms(&took));
             match result {
@@ -845,7 +843,11 @@ impl Miner {
                     invalid_transactions.insert(hash);
                 }
                 // imported ok
-                _ => tx_count += 1,
+                _ => {
+                    tx_count += 1;
+                    info!(target: "miner", "hash {}, price {}", hash, gas_price);
+                    gas_prices.push(gas_price);
+                }
             }
         }
 
@@ -855,7 +857,7 @@ impl Miner {
             Some(v) => min_price = v.to_string(), 
             _ => (),
         }
-        info!(target: "miner", "latest_block: {} prepare_next_block() complete. min price is {}", block_number, min_price);
+        info!(target: "miner", "latest_block: {} prepare_next_block() complete. min price is  {}", block_number, min_price);
         debug!(target: "miner", "Pushed {} transactions in {} ms", tx_count, took_ms(&elapsed));
 
         /*
@@ -867,6 +869,8 @@ impl Miner {
             }
         };
 
+        */
+
         {
             self.transaction_queue
                 .remove(invalid_transactions.iter(), true);
@@ -875,8 +879,7 @@ impl Miner {
             self.transaction_queue.penalize(senders_to_penalize.iter());
         }
 
-        Some((block, original_work_hash))
-        */
+        //Some((block, original_work_hash))
         return true;
     }
     /// Returns `true` if we should create pending block even if some other conditions are not met.
