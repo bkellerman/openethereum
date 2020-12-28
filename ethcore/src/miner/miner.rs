@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ethereum_types::U64;
 use ansi_term::Colour;
 use bytes::Bytes;
 use call_contract::CallContract;
@@ -412,7 +413,8 @@ impl Miner {
     where
         C: BlockChain + CallContract + BlockProducer + Nonce + Sync,
     {
-        trace_time!("prepare_block");
+        //trace_time!("prepare_block");
+        info!("prepare_block");
         let chain_info = chain.chain_info();
 
         // Open block
@@ -616,12 +618,10 @@ impl Miner {
                 .remove(not_allowed_transactions.iter(), false);
             self.transaction_queue.penalize(senders_to_penalize.iter());
         }
-        //self.prepare_next_block(chain, &block.transactions_set);
-        info!(target: "miner", "Prepare_block w/ {} txs", block.transactions_set.len());
         Some((block, original_work_hash))
     }
 
-    fn prepare_next_block<C>(&self, chain: &C, txs: &HashSet<H256>) -> bool
+    fn prepare_next_block<C>(&self, chain: &C) -> (u64, std::string::String)
     where
         C: BlockChain + CallContract + BlockProducer + Nonce + Sync,
     {
@@ -678,15 +678,6 @@ impl Miner {
         */
 
         let params = self.params.read().clone();
-        /*
-        let mut open_block = chain.prepare_open_block(
-                         params.author,
-                         params.gas_range_target,
-                         params.extra_data,
-                     );
-                     */
-
-
 
         let mut open_block =
                 match chain.prepare_open_block(
@@ -697,15 +688,16 @@ impl Miner {
                     Ok(block) => block,
                     Err(err) => {
                         warn!(target: "miner", "Error {:?}", err);
-                        return false;
+                        return (0, "Error".to_string());
                     }
                 };
-
 
         let mut invalid_transactions = HashSet::new();
         let mut not_allowed_transactions = HashSet::new();
         let mut senders_to_penalize = HashSet::new();
-        let block_number = open_block.header.number();
+        let block_number:u64 = open_block.header.number();
+        let pending_hashes = self.pending_transaction_hashes(chain);
+
         let mut gas_prices = Vec::new();
 
         let mut tx_count = 0usize;
@@ -764,11 +756,10 @@ impl Miner {
             let gas_price = transaction.tx().gas_price;
             let hash = transaction.hash();
             let sender = transaction.sender();
-            if txs.contains(&hash) {
-                info!(target: "miner", "Tx {} already in pending block", hash);
+            if pending_hashes.contains(&hash) {
+                info!(target: "miner", "Tx {} already in pending block. PendingSet {:?}", hash, self.options.pending_set);
                 continue
             }
-            //let sender = transaction.sender();
 
             // Re-verify transaction again vs current state.
             let result = client
@@ -880,7 +871,8 @@ impl Miner {
         }
 
         //Some((block, original_work_hash))
-        return true;
+        //return true;
+        return (block_number, min_price);
     }
     /// Returns `true` if we should create pending block even if some other conditions are not met.
     ///
@@ -1170,6 +1162,12 @@ const SEALING_TIMEOUT_IN_BLOCKS: u64 = 5;
 impl miner::MinerService for Miner {
     type State = State<::state_db::StateDB>;
 
+    fn next_min_gas_price<C: miner::BlockChainClient>(&self, chain: &C) -> (u64, std::string::String)
+    where
+        C: BlockChain,
+    {
+        return self.prepare_next_block(chain);
+    }
     fn authoring_params(&self) -> AuthoringParams {
         self.params.read().clone()
     }
@@ -1261,6 +1259,7 @@ impl miner::MinerService for Miner {
             && self.sealing.lock().reseal_allowed()
         {
             self.prepare_and_update_sealing(chain);
+            //self.prepare_next_block(chain);
         }
 
         results

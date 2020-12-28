@@ -862,6 +862,11 @@ where
         Box::new(future::done(result))
     }
 
+    fn next_min_gas_price(&self) -> BoxFuture<Option<(u64, std::string::String)>> {
+        let result = Ok(Some(self.miner.next_min_gas_price(&*self.client)));
+        Box::new(future::done(result))
+    }
+
     fn transaction_by_hash(&self, hash: H256) -> BoxFuture<Option<Transaction>> {
         let tx = try_bf!(self.transaction(PendingTransactionId::Hash(hash))).or_else(|| {
             self.miner

@@ -32,7 +32,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-
+use ethereum_types::U64;
 use bytes::Bytes;
 use ethcore_miner::pool::{local_transactions, QueueStatus, VerifiedTransaction};
 use ethereum_types::{Address, H256, U256};
@@ -73,6 +73,8 @@ pub trait MinerService: Send + Sync {
     type State: StateInfo + 'static;
 
     // Sealing
+
+    fn next_min_gas_price<C: BlockChainClient>(&self, chain: &C) -> (u64, std::string::String);
 
     /// Submit `seal` as a valid solution for the header of `pow_hash`.
     /// Will check the seal, but not actually insert the block into the chain.

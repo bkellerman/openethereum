@@ -88,6 +88,10 @@ pub trait Eth {
     #[rpc(name = "eth_getBlockByNumber")]
     fn block_by_number(&self, _: BlockNumber, _: bool) -> BoxFuture<Option<RichBlock>>;
 
+    /// Returns block with given number.
+    #[rpc(name = "eth_getNextMinGasPrice")]
+    fn next_min_gas_price(&self) -> BoxFuture<Option<(u64, std::string::String)>>;
+
     /// Returns the number of transactions sent from given address at given time (block number).
     #[rpc(name = "eth_getTransactionCount")]
     fn transaction_count(&self, _: H160, _: Option<BlockNumber>) -> BoxFuture<U256>;
