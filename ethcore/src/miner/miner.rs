@@ -21,7 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ethereum_types::U64;
 use ansi_term::Colour;
 use bytes::Bytes;
 use call_contract::CallContract;
@@ -696,7 +695,15 @@ impl Miner {
         let mut not_allowed_transactions = HashSet::new();
         let mut senders_to_penalize = HashSet::new();
         let block_number:u64 = open_block.header.number();
-        let pending_hashes = self.pending_transaction_hashes(chain);
+        let pending_hashes = self.pending_only_transaction_hashes(chain);
+        if pending_hashes.len() == 0 {
+            info!(target: "miner", "No pending hashes yet.");
+            return (block_number, "None".to_string());
+
+        }
+        info!(target: "miner", "Pending hashes {:?}", pending_hashes);
+        let pending_gas_prices = self.pending_only_gas_prices(chain);
+        info!(target: "miner", "Pending gas_prices {:?}", pending_gas_prices);
 
         let mut gas_prices = Vec::new();
 
@@ -757,7 +764,7 @@ impl Miner {
             let hash = transaction.hash();
             let sender = transaction.sender();
             if pending_hashes.contains(&hash) {
-                info!(target: "miner", "Tx {} already in pending block. PendingSet {:?}", hash, self.options.pending_set);
+                debug!(target: "miner", "Tx {} already in pending block. PendingSet {:?}", hash, self.options.pending_set);
                 continue
             }
 
@@ -828,15 +835,12 @@ impl Miner {
                 }
                 Err(e) => {
                     debug!(target: "txqueue", "[{:?}] Marking as invalid: {:?}.", hash, e);
-                    debug!(
-                        target: "miner", "Error adding transaction to block: number={}. transaction_hash={:?}, Error: {:?}", block_number, hash, e
-                    );
                     invalid_transactions.insert(hash);
                 }
                 // imported ok
                 _ => {
                     tx_count += 1;
-                    info!(target: "miner", "hash {}, price {}", hash, gas_price);
+                    debug!(target: "miner", "hash {}, price {}", hash, gas_price);
                     gas_prices.push(gas_price);
                 }
             }
@@ -848,19 +852,8 @@ impl Miner {
             Some(v) => min_price = v.to_string(), 
             _ => (),
         }
-        info!(target: "miner", "latest_block: {} prepare_next_block() complete. min price is  {}", block_number, min_price);
+        info!(target: "miner", "latest_block: {} prepare_next_block() complete. min price is {}", block_number-1, min_price);
         debug!(target: "miner", "Pushed {} transactions in {} ms", tx_count, took_ms(&elapsed));
-
-        /*
-        let block = match open_block.close() {
-            Ok(block) => block,
-            Err(err) => {
-                warn!(target: "miner", "Closing the block failed with error {:?}. This is likely an error in chain specificiations or on-chain consensus smart contracts.", err);
-                return None;
-            }
-        };
-
-        */
 
         {
             self.transaction_queue
@@ -872,7 +865,7 @@ impl Miner {
 
         //Some((block, original_work_hash))
         //return true;
-        return (block_number, min_price);
+        return (block_number+1, min_price);
     }
     /// Returns `true` if we should create pending block even if some other conditions are not met.
     ///
@@ -1358,6 +1351,50 @@ impl miner::MinerService for Miner {
             PendingSet::AlwaysSealing => from_pending().unwrap_or_default(),
             PendingSet::SealingOrElseQueue => from_pending().unwrap_or_else(from_queue),
         }
+    }
+
+    fn pending_only_transaction_hashes<C>(&self, chain: &C) -> BTreeSet<H256>
+    where
+        C: ChainInfo + Sync,
+    {
+        let chain_info = chain.chain_info();
+
+        let from_pending = || {
+            self.map_existing_pending_block(
+                |sealing| {
+                    sealing
+                        .transactions
+                        .iter()
+                        .map(|signed| signed.hash())
+                        .collect()
+                },
+                chain_info.best_block_number,
+            )
+        };
+
+        return from_pending().unwrap_or_default();
+    }
+
+    fn pending_only_gas_prices<C>(&self, chain: &C) -> BTreeSet<U256>
+    where
+        C: ChainInfo + Sync,
+    {
+        let chain_info = chain.chain_info();
+
+        let from_pending = || {
+            self.map_existing_pending_block(
+                |sealing| {
+                    sealing
+                        .transactions
+                        .iter()
+                        .map(|signed| signed.tx().gas_price)
+                        .collect()
+                },
+                chain_info.best_block_number,
+            )
+        };
+
+        return from_pending().unwrap_or_default();
     }
 
     fn ready_transactions<C>(

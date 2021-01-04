@@ -32,7 +32,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use ethereum_types::U64;
 use bytes::Bytes;
 use ethcore_miner::pool::{local_transactions, QueueStatus, VerifiedTransaction};
 use ethereum_types::{Address, H256, U256};
@@ -208,6 +207,20 @@ pub trait MinerService: Send + Sync {
     ///
     /// Depending on the settings may look in transaction pool or only in pending block.
     fn pending_transaction_hashes<C>(&self, chain: &C) -> BTreeSet<H256>
+    where
+        C: ChainInfo + Sync;
+
+    /// Get a set of all pending transaction hashes.
+    ///
+    /// Only look in pending block.
+    fn pending_only_transaction_hashes<C>(&self, chain: &C) -> BTreeSet<H256>
+    where
+        C: ChainInfo + Sync;
+
+    /// Get a set of all pending transaction gas prices.
+    ///
+    /// Only look in pending block.
+    fn pending_only_gas_prices<C>(&self, chain: &C) -> BTreeSet<U256>
     where
         C: ChainInfo + Sync;
 
